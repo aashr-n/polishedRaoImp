@@ -159,35 +159,40 @@ def main():
     # Define tolerance around period (±10%)
     tol = int(0.1 * period_samples)
 
-    # 3.5) Identify time segments where stim frequency power is highest
-
+    # 3.5) Identify time segments where stim frequency power is highest using multitaper
     import numpy as np
-    from scipy.signal import welch
+    from mne.time_frequency import psd_array_multitaper
 
+    signal = channel_data[0]
+    times = np.arange(signal.size)/sfreq
     # Define sliding window parameters (e.g., 2-second windows with 1-second overlap)
-    win_sec    = 2.0
-    step_sec   = 1.0
-    nperseg    = int(win_sec * sfreq)
-    noverlap   = int((win_sec - step_sec) * sfreq)
-
-    times = np.arange(signal.size) / sfreq
+    win_sec  = 0.5
+    step_sec = 0.25
+    nperseg  = int(win_sec * sfreq)
+    step_samps = int(step_sec * sfreq)
     segment_centers = []
     segment_power   = []
 
     # Slide window through the signal
-    for start in np.arange(0, signal.size - nperseg + 1, step_sec * sfreq, dtype=int):
+    for start in range(0, signal.size - nperseg + 1, step_samps):
         stop = start + nperseg
-        freqs_w, psd_w = welch(signal[start:stop], fs=sfreq, nperseg=nperseg)
+        # multitaper PSD on this window
+        psd_w, freqs_w = psd_array_multitaper(
+            signal[start:stop][None, :], sfreq=sfreq,
+            fmin=0, fmax=sfreq/2, bandwidth=stim_freq/5,
+            adaptive=True, low_bias=True, normalization='full', verbose=False
+        )
+        psd_w = psd_w[0]  # extract 1D array
         # Find power at the nearest frequency bin to stim_freq
         idx = np.argmin(np.abs(freqs_w - stim_freq))
         segment_centers.append((start + stop) / 2 / sfreq)
         segment_power.append(psd_w[idx])
 
-    segment_power = np.array(segment_power)
-    segment_centers = np.array(segment_centers)
+    segment_power    = np.array(segment_power)
+    segment_centers  = np.array(segment_centers)
 
     # Determine threshold for “high” stim power (e.g., top 25% of windows)
-    thresh_power = np.percentile(segment_power, 75)
+    thresh_power = np.percentile(segment_power, 60)
     high_idx = segment_power >= thresh_power
     high_times = segment_centers[high_idx]
 
@@ -200,6 +205,12 @@ def main():
     plt.plot(times, signal, label='Signal')
     for t0 in high_times:
         plt.axvspan(t0 - win_sec/2, t0 + win_sec/2, color='red', alpha=0.3)
+    # Add power labels at the center of each high-power window
+    for idx, t0 in enumerate(high_times):
+        power = segment_power[high_idx][idx]
+        plt.text(t0, plt.ylim()[1]*0.9, f"{power:.2f}",
+                 ha='center', va='top', fontsize=8, color='black',
+                 backgroundcolor='white', alpha=0.6)
     plt.xlabel('Time (s)')
     plt.ylabel('Amplitude / Power')
     plt.title('Signal with High Stim-Frequency Power Segments Highlighted')
