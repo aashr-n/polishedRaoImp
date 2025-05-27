@@ -119,66 +119,6 @@ def find_stim_frequency(mean_psd, freqs, prominence=20, min_freq=0):
     stim_freq = np.min(valid_freqs)
     return stim_freq
 
-def detect_artifacts(avg_signal, sfreq, stim_freq):
-    import numpy as np
-    from scipy.signal import find_peaks
-
-    # 1) thresholded peak detection with refractory filtering
-    thresh = np.mean(np.abs(avg_signal)) + 3 * np.std(np.abs(avg_signal))
-    min_diff = int((1.0 / stim_freq) * sfreq / 2)
-    peaks, props = find_peaks(np.abs(avg_signal), height=thresh, distance=min_diff)
-    stim_inds = peaks.tolist()
-
-    # 2) enforce minimum inter-pulse interval (half the period)
-    min_diff = int((1.0 / stim_freq) * sfreq / 2)
-    i = 0
-    while i + 1 < len(stim_inds):
-        if stim_inds[i+1] - stim_inds[i] < min_diff:
-            del stim_inds[i+1]
-        else:
-            i += 1
-    # Check last pair
-    if len(stim_inds) >= 2 and stim_inds[-1] - stim_inds[-2] < min_diff:
-        stim_inds.pop()
-
-    return stim_inds
-
-def template_match_starts(avg_signal, starts, sfreq, stim_freq):
-    import numpy as np
-    avg_signal = np.asarray(avg_signal, dtype=float)
-    # Ensure starts indices are integers
-    starts = [int(s) for s in starts]
-    from scipy.signal import find_peaks
-    win_samp = int(5 * sfreq / 1000)
-    snippets = []
-    for s in starts[:10]:
-        seg = avg_signal[max(0, s - win_samp): s + win_samp]
-        if len(seg) < 2 * win_samp:
-            seg = np.pad(seg, (0, 2 * win_samp - len(seg)))
-        snippets.append(seg)
-    template = np.mean(snippets, axis=0)
-    mf = np.convolve(avg_signal, template[::-1], mode='same')
-    thr = np.percentile(mf, 80)
-    dist = int(0.5 * (sfreq / stim_freq))
-    peaks, _ = find_peaks(mf, height=thr, distance=dist)
-    half = len(template) // 2
-    ends = [min(len(avg_signal) - 1, p + half) for p in peaks]
-    return peaks.tolist(), ends, template, mf
-
-def spline_remove(data, starts, ends):
-    from scipy.interpolate import CubicSpline
-    import numpy as np
-    clean = data.copy()
-    for ch in range(clean.shape[0]):
-        if np.isnan(clean[ch, 0]):
-            continue
-        for s, e in zip(starts, ends):
-            x = [s - 1, e + 1]
-            y = clean[ch, x]
-            cs = CubicSpline(x, y)
-            xs = np.arange(s, e + 1)
-            clean[ch, xs] = cs(xs)
-    return clean
 
 def main():
     # i should look through detect_artifacts() and template_match()
@@ -193,43 +133,6 @@ def main():
     data = raw.get_data()
     avg_sig = data.mean(axis=0)
 
-    #below is commented out to
-    '''
-    #maybe we can use the best_ch to get the stim frequency, because it would be clearest
-    # Restrict PSD computation to the clearest channel only
-    # (best_ch/channel_data will be defined after artifact detection)
-
-
-    #################
-
-    # 2) PSD & stim frequency
-    #mean_psd, freqs = compute_mean_psd(channel_data, sfreq)
-    mean_REAL_psd, freqs = compute_mean_psd(data, sfreq)
-    stim_freq = find_stim_frequency(mean_REAL_psd, freqs)
-    print(f"Estimated stim frequency: {stim_freq:.2f} Hz")
-
-    # 3) Artifact detection
-    initial_starts = detect_artifacts(avg_sig, sfreq, stim_freq)
-    starts, ends, template, mf_out = template_match_starts(
-        avg_sig, initial_starts, sfreq, stim_freq
-    )
-    print(f"Detected {len(starts)} artifact pulses")
-
-    # 2) Choose channel with largest artifact response (after artifact detection)
-    # Compute sum of absolute raw amplitudes at artifact starts for each channel
-    responses = [np.sum(np.abs(data[ch_idx, starts])) for ch_idx in range(data.shape[0])]
-    best_idx = int(np.argmax(responses))
-    best_ch = raw.ch_names[best_idx]
-    print(f"Selected channel for plotting: {best_ch}. Index: {best_idx}")
-
-    # Selected channel for plotting: POL R ACC1-Ref. Index: 8
-
-    #recalculaet on clearest stim arrticaft vchannel
-
-    # Restrict PSD computation to the clearest channel only
-    ch_idx = raw.ch_names.index(best_ch)
-    channel_data = data[ch_idx:ch_idx+1, :]'''
-
     
     channel_data = data[8:9, :]# this is for the shortcut testing when you know best channel!!!!
 
@@ -243,96 +146,66 @@ def main():
     #this is what we use from here on out
 
 
-    '''# 3) Artifact detection
-    initial_starts = detect_artifacts(avg_sig, sfreq, stim_freq)
-    starts, ends, template, mf_out = template_match_starts(
-        avg_sig, initial_starts, sfreq, stim_freq
-    )
-    print(f"Detected {len(starts)} artifact pulses in clearest channel")
 
-    # --- Refine artifact boundaries by local baseline crossings ---
+    ###########################CONVOLUTION######################################
+
+    # --- Step 3: Periodic Prominence-Based Peak Detection ---
+
+    # 3.1) Prepare signal and parameters
     signal = channel_data[0]
-    baseline = np.median(signal)
-    refined_starts = []
-    refined_ends   = []
-    half_win = int((1.0 / stim_freq) * sfreq / 2)  # half expected period
-    for p in starts:
-        # scan backward for where signal crosses baseline
-        i = p
-        while i > 0 and (signal[i] - baseline) * (signal[i-1] - baseline) > 0:
-            i -= 1
-        refined_starts.append(i)
-        # scan forward for crossing
-        j = p
-        while j < len(signal)-1 and (signal[j] - baseline) * (signal[j+1] - baseline) > 0:
-            j += 1
-        refined_ends.append(j)
-    starts, ends = refined_starts, refined_ends
-    print("Artifact boundaries refined by baseline crossings.")
+    # Convert stim frequency to expected sample period
+    period_samples = int(sfreq / stim_freq)
+    half_period = period_samples // 2
+    # Define tolerance around period (±10%)
+    tol = int(0.1 * period_samples)
 
-    # 4) Artifact removal on clearest channel!
-    cleaned = spline_remove(channel_data, starts, ends)
-    print("Spline artifact removal complete.")
+    # 3.5) Identify time segments where stim frequency power is highest
 
-    # --- Overlay synthetic square wave for stim-rate validation ---
     import numpy as np
-    from scipy.signal import square
+    from scipy.signal import welch
 
-    # Align phase to first artifact
-    t0 = starts[0] / sfreq
-    # Time axis
-    times = np.arange(len(avg_sig)) / sfreq
-    # Synthetic square wave
-    sq = square(2 * np.pi * stim_freq * (times - t0))
-    sq *= np.max(np.abs(avg_sig))
+    # Define sliding window parameters (e.g., 2-second windows with 1-second overlap)
+    win_sec    = 2.0
+    step_sec   = 1.0
+    nperseg    = int(win_sec * sfreq)
+    noverlap   = int((win_sec - step_sec) * sfreq)
 
-    # Plot comparison
+    times = np.arange(signal.size) / sfreq
+    segment_centers = []
+    segment_power   = []
+
+    # Slide window through the signal
+    for start in np.arange(0, signal.size - nperseg + 1, step_sec * sfreq, dtype=int):
+        stop = start + nperseg
+        freqs_w, psd_w = welch(signal[start:stop], fs=sfreq, nperseg=nperseg)
+        # Find power at the nearest frequency bin to stim_freq
+        idx = np.argmin(np.abs(freqs_w - stim_freq))
+        segment_centers.append((start + stop) / 2 / sfreq)
+        segment_power.append(psd_w[idx])
+
+    segment_power = np.array(segment_power)
+    segment_centers = np.array(segment_centers)
+
+    # Determine threshold for “high” stim power (e.g., top 25% of windows)
+    thresh_power = np.percentile(segment_power, 75)
+    high_idx = segment_power >= thresh_power
+    high_times = segment_centers[high_idx]
+
+    print(f"Highlighting {high_idx.sum()} segments with high stim-frequency power")
+
+    # 3.6) Plot the full signal and mark high-power windows
     import matplotlib.pyplot as plt
+
     plt.figure(figsize=(12, 4))
-    plt.plot(times, avg_sig, label='Average Signal', alpha=0.6)
-    plt.plot(times, sq,      label=f'Synthetic {stim_freq:.2f} Hz Square', linestyle='--')
-    plt.xlim(t0, t0 + 1)
+    plt.plot(times, signal, label='Signal')
+    for t0 in high_times:
+        plt.axvspan(t0 - win_sec/2, t0 + win_sec/2, color='red', alpha=0.3)
     plt.xlabel('Time (s)')
-    plt.ylabel('Amplitude')
-    plt.title('Real vs. Synthetic Square Wave')
+    plt.ylabel('Amplitude / Power')
+    plt.title('Signal with High Stim-Frequency Power Segments Highlighted')
     plt.legend()
     plt.tight_layout()
     plt.show()
-
-    # --- Mark and list artifact start/end times ---
-    # Convert sample indices to seconds
-    start_times = np.array(starts) / sfreq
-    end_times   = np.array(ends)   / sfreq
-
-
-    # Plot on the average signal
-    plt.figure(figsize=(12, 4))
-    plt.plot(times, avg_sig, label='Average Signal')
-    # Plot artifact starts/ends at the signal amplitude
-    y_start = avg_sig[starts]
-    y_end   = avg_sig[ends]
-    plt.scatter(start_times, y_start, color='green', marker='o', label='Starts')
-    plt.scatter(end_times,   y_end,   color='red',   marker='x', label='Ends')
-    plt.xlabel('Time (s)')
-    plt.ylabel('Amplitude')
-    plt.title('Artifact Start/End Markers')
-    plt.legend()
-    plt.tight_layout()
-    plt.show()
-
-    # --- Display and compare on the clearest stim channel ---
-    import matplotlib.pyplot as plt
-    import numpy as np
-
-    # 1) Show detected stim frequency
-    print(f"Detected stimulation frequency: {stim_freq:.2f} Hz")
-
-
-    # Extract time series for that channel
-    raw_ts = channel_data[0]
-    clean_ts = cleaned[0]
-    times = np.arange(raw_ts.size) / sfreq'''
-
 
 
 
