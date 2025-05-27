@@ -122,13 +122,32 @@ def find_stim_frequency(mean_psd, freqs, prominence=20, min_freq=0):
 def detect_artifacts(avg_signal, sfreq, stim_freq):
     import numpy as np
     from scipy.signal import find_peaks
+
+    # 1) thresholded peak detection with refractory filtering
     thresh = np.mean(np.abs(avg_signal)) + 3 * np.std(np.abs(avg_signal))
-    min_dist = int(0.8 * (sfreq / stim_freq))
-    peaks, _ = find_peaks(np.abs(avg_signal), height=thresh, distance=min_dist)
-    return peaks.tolist()
+    min_diff = int((1.0 / stim_freq) * sfreq / 2)
+    peaks, props = find_peaks(np.abs(avg_signal), height=thresh, distance=min_diff)
+    stim_inds = peaks.tolist()
+
+    # 2) enforce minimum inter-pulse interval (half the period)
+    min_diff = int((1.0 / stim_freq) * sfreq / 2)
+    i = 0
+    while i + 1 < len(stim_inds):
+        if stim_inds[i+1] - stim_inds[i] < min_diff:
+            del stim_inds[i+1]
+        else:
+            i += 1
+    # Check last pair
+    if len(stim_inds) >= 2 and stim_inds[-1] - stim_inds[-2] < min_diff:
+        stim_inds.pop()
+
+    return stim_inds
 
 def template_match_starts(avg_signal, starts, sfreq, stim_freq):
     import numpy as np
+    avg_signal = np.asarray(avg_signal, dtype=float)
+    # Ensure starts indices are integers
+    starts = [int(s) for s in starts]
     from scipy.signal import find_peaks
     win_samp = int(5 * sfreq / 1000)
     snippets = []
@@ -162,18 +181,20 @@ def spline_remove(data, starts, ends):
     return clean
 
 def main():
+    # i should look through detect_artifacts() and template_match()
     import mne
     import numpy as np
 
     # 1) Load data
-    path = select_fif_file()
+    #path = select_fif_file()
+    path = '/Users/aashray/Documents/ChangLab/RCS04_tr_103_eeg_raw.fif'
     raw = mne.io.read_raw_fif(path, preload=True)
     sfreq = raw.info['sfreq']
     data = raw.get_data()
     avg_sig = data.mean(axis=0)
 
-
-
+    #below is commented out to
+    '''
     #maybe we can use the best_ch to get the stim frequency, because it would be clearest
     # Restrict PSD computation to the clearest channel only
     # (best_ch/channel_data will be defined after artifact detection)
@@ -201,29 +222,53 @@ def main():
     best_ch = raw.ch_names[best_idx]
     print(f"Selected channel for plotting: {best_ch}. Index: {best_idx}")
 
+    # Selected channel for plotting: POL R ACC1-Ref. Index: 8
 
     #recalculaet on clearest stim arrticaft vchannel
 
     # Restrict PSD computation to the clearest channel only
     ch_idx = raw.ch_names.index(best_ch)
-    channel_data = data[ch_idx:ch_idx+1, :]
+    channel_data = data[ch_idx:ch_idx+1, :]'''
 
     
+    channel_data = data[8:9, :]# this is for the shortcut testing when you know best channel!!!!
+
 
     avg_sig = channel_data.mean(axis = 0) #recalculate avg_sig for clear chnanel?
 
     # 2) PSD & stim frequency
     clearest_psd, freqs = compute_mean_psd(channel_data, sfreq)
     stim_freq = find_stim_frequency(clearest_psd, freqs)
-    print(f"Estimated stim frequency of clearest channel: {stim_freq:.2f} Hz")
+    print(f"Estimated stim frequency of clearest channel: {stim_freq:.2f} Hz") 
+    #this is what we use from here on out
 
 
-    # 3) Artifact detection
+    '''# 3) Artifact detection
     initial_starts = detect_artifacts(avg_sig, sfreq, stim_freq)
     starts, ends, template, mf_out = template_match_starts(
         avg_sig, initial_starts, sfreq, stim_freq
     )
     print(f"Detected {len(starts)} artifact pulses in clearest channel")
+
+    # --- Refine artifact boundaries by local baseline crossings ---
+    signal = channel_data[0]
+    baseline = np.median(signal)
+    refined_starts = []
+    refined_ends   = []
+    half_win = int((1.0 / stim_freq) * sfreq / 2)  # half expected period
+    for p in starts:
+        # scan backward for where signal crosses baseline
+        i = p
+        while i > 0 and (signal[i] - baseline) * (signal[i-1] - baseline) > 0:
+            i -= 1
+        refined_starts.append(i)
+        # scan forward for crossing
+        j = p
+        while j < len(signal)-1 and (signal[j] - baseline) * (signal[j+1] - baseline) > 0:
+            j += 1
+        refined_ends.append(j)
+    starts, ends = refined_starts, refined_ends
+    print("Artifact boundaries refined by baseline crossings.")
 
     # 4) Artifact removal on clearest channel!
     cleaned = spline_remove(channel_data, starts, ends)
@@ -254,6 +299,27 @@ def main():
     plt.tight_layout()
     plt.show()
 
+    # --- Mark and list artifact start/end times ---
+    # Convert sample indices to seconds
+    start_times = np.array(starts) / sfreq
+    end_times   = np.array(ends)   / sfreq
+
+
+    # Plot on the average signal
+    plt.figure(figsize=(12, 4))
+    plt.plot(times, avg_sig, label='Average Signal')
+    # Plot artifact starts/ends at the signal amplitude
+    y_start = avg_sig[starts]
+    y_end   = avg_sig[ends]
+    plt.scatter(start_times, y_start, color='green', marker='o', label='Starts')
+    plt.scatter(end_times,   y_end,   color='red',   marker='x', label='Ends')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Amplitude')
+    plt.title('Artifact Start/End Markers')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
     # --- Display and compare on the clearest stim channel ---
     import matplotlib.pyplot as plt
     import numpy as np
@@ -265,7 +331,7 @@ def main():
     # Extract time series for that channel
     raw_ts = channel_data[0]
     clean_ts = cleaned[0]
-    times = np.arange(raw_ts.size) / sfreq
+    times = np.arange(raw_ts.size) / sfreq'''
 
 
 
