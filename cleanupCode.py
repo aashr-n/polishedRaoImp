@@ -130,6 +130,8 @@ def main():
     path = '/Users/aashray/Documents/ChangLab/RCS04_tr_103_eeg_raw.fif'
     raw = mne.io.read_raw_fif(path, preload=True)
     sfreq = raw.info['sfreq']
+    print(f"Sample frequency : {sfreq}")
+
     data = raw.get_data()
     avg_sig = data.mean(axis=0)
 
@@ -165,9 +167,9 @@ def main():
 
     signal = channel_data[0]
     times = np.arange(signal.size)/sfreq
-    # Define sliding window parameters (e.g., 2-second windows with 1-second overlap)
-    win_sec  = 0.5
-    step_sec = 0.25
+    # trying to dynamically create windows and steps
+    win_sec  = round(sfreq/5000, 1) #0.2
+    step_sec = win_sec/2 #0.1
     nperseg  = int(win_sec * sfreq)
     step_samps = int(step_sec * sfreq)
     segment_centers = []
@@ -210,7 +212,9 @@ def main():
     plt.plot(times, signal, label='Signal')
     # Plot windows colored by relative power
     import matplotlib.cm as cm
-    cmap = cm.get_cmap('Reds')  # red shades
+
+    cmap = cm.get_cmap('Reds')  # 'Reds' and 'plasma' are pretty good
+    #for diff colors reference: https://www.analyticsvidhya.com/blog/2020/09/colormaps-matplotlib/
     
     for idx, t0 in enumerate(high_times):
         # normalized power between 0 and 1
