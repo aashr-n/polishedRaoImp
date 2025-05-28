@@ -208,15 +208,17 @@ def main():
 
     plt.figure(figsize=(12, 4))
     plt.plot(times, signal, label='Signal')
-    for t0 in high_times:
-        plt.axvspan(t0 - win_sec/2, t0 + win_sec/2, color='red', alpha=0.3)
-    # Add power labels at the center of each high-power window
+    # Plot windows colored by relative power
+    import matplotlib.cm as cm
+    cmap = cm.get_cmap('Reds')  # red shades
+    
     for idx, t0 in enumerate(high_times):
+        # normalized power between 0 and 1
         power = segment_power[high_idx][idx]
-        norm_power = (power / max_high_power) * 100.0
-        plt.text(t0, plt.ylim()[1]*0.9, f"{norm_power:.1f}",
-                 ha='center', va='top', fontsize=8, color='black',
-                 backgroundcolor='white', alpha=0.6)
+        norm_power = power / max_high_power
+        # choose color from colormap
+        color = cmap(norm_power)
+        plt.axvspan(t0 - win_sec/2, t0 + win_sec/2, color=color, alpha=0.5)
     plt.xlabel('Time (s)')
     plt.ylabel('Amplitude / Power')
     plt.title('Signal with High Stim-Frequency Power Segments Highlighted')
