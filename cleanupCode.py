@@ -186,13 +186,15 @@ def main():
         # Find power at the nearest frequency bin to stim_freq
         idx = np.argmin(np.abs(freqs_w - stim_freq))
         segment_centers.append((start + stop) / 2 / sfreq)
-        segment_power.append(psd_w[idx])
+        # Normalize stim-frequency power by total power in this window
+        rel_power = psd_w[idx] / np.sum(psd_w)
+        segment_power.append(rel_power)
 
     segment_power    = np.array(segment_power)
     segment_centers  = np.array(segment_centers)
 
     # Determine threshold for “high” stim power (e.g., top 25% of windows)
-    thresh_power = np.percentile(segment_power, 60)
+    thresh_power = np.percentile(segment_power, 70)
     high_idx = segment_power >= thresh_power
     high_times = segment_centers[high_idx]
 
