@@ -243,6 +243,45 @@ def main():
     plt.tight_layout()
     plt.show()
 
+    # --- Determine true stimulation period by expanding from 100% windows ---
+    import numpy as np
+
+    # Find maximum prominence value (should be 100 after normalization)
+    segment_prom_rel = segment_power  # Here, segment_power is already relative power (%)
+    max_prom_val = segment_prom_rel.max()
+    # Locate indices of windows at max prominence
+    max_idxs = np.where(segment_prom_rel == max_prom_val)[0]
+    first_max, last_max = max_idxs.min(), max_idxs.max()
+
+    # Define a drop fraction (e.g., 80% of max) to detect sharp drop-off
+    drop_frac = 0.1 # this seems to work?????
+    drop_thresh = drop_frac * max_prom_val
+
+    # Expand left from first_max until relative prominence falls below drop_thresh
+    start_idx = first_max
+    while start_idx > 0 and segment_prom_rel[start_idx] >= drop_thresh:
+        start_idx -= 1
+    stim_start_time = segment_centers[start_idx]
+
+    # Expand right from last_max until relative prominence falls below drop_thresh
+    end_idx = last_max
+    while end_idx < len(segment_prom_rel) - 1 and segment_prom_rel[end_idx] >= drop_thresh:
+        end_idx += 1
+    stim_end_time = segment_centers[end_idx]
+
+    print(f"Estimated stimulation active from {stim_start_time:.2f}s to {stim_end_time:.2f}s")
+
+    # --- Plot the full trace with the detected stim period highlighted ---
+    plt.figure(figsize=(12, 4))
+    plt.plot(times, signal, label='Signal')
+    plt.axvspan(stim_start_time, stim_end_time, color='green', alpha=0.3, label='Stim Period')
+    plt.xlabel('Time (s)')
+    plt.ylabel('Amplitude')
+    plt.title('Detected Continuous Stimulation Period')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
 
 
 if __name__ == "__main__":
