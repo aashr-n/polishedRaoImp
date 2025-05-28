@@ -194,7 +194,7 @@ def main():
     segment_centers  = np.array(segment_centers)
 
     # Determine threshold for “high” stim power (e.g., for top 25% of windows set 75)
-    thresh_power = np.percentile(segment_power, 65)
+    thresh_power = np.percentile(segment_power, 0)
     high_idx = segment_power >= thresh_power
     high_times = segment_centers[high_idx]
 
@@ -219,6 +219,19 @@ def main():
         # choose color from colormap
         color = cmap(norm_power)
         plt.axvspan(t0 - win_sec/2, t0 + win_sec/2, color=color, alpha=0.5)
+
+    # Add a colorbar indicating relative PSD power (0–100%)
+    from matplotlib.colors import Normalize
+    from matplotlib.cm import ScalarMappable
+
+    # Create a ScalarMappable for the colormap
+    norm = Normalize(vmin=0, vmax=100)
+    sm = ScalarMappable(norm=norm, cmap=cmap)
+    sm.set_array([])  # dummy mappable
+    ax = plt.gca()
+    cbar = plt.colorbar(sm, ax=ax, pad=0.02)
+    cbar.set_label('Relative Stim-Freq Power (%)')
+
     plt.xlabel('Time (s)')
     plt.ylabel('Amplitude / Power')
     plt.title('Signal with High Stim-Frequency Power Segments Highlighted')
