@@ -187,18 +187,21 @@ def main():
         idx = np.argmin(np.abs(freqs_w - stim_freq))
         segment_centers.append((start + stop) / 2 / sfreq)
         # Normalize stim-frequency power by total power in this window
-        rel_power = psd_w[idx] / np.sum(psd_w)
+        rel_power = (psd_w[idx] / np.sum(psd_w)) * 100
         segment_power.append(rel_power)
 
     segment_power    = np.array(segment_power)
     segment_centers  = np.array(segment_centers)
 
-    # Determine threshold for “high” stim power (e.g., top 25% of windows)
-    thresh_power = np.percentile(segment_power, 70)
+    # Determine threshold for “high” stim power (e.g., for top 25% of windows set 75)
+    thresh_power = np.percentile(segment_power, 65)
     high_idx = segment_power >= thresh_power
     high_times = segment_centers[high_idx]
 
     print(f"Highlighting {high_idx.sum()} segments with high stim-frequency power")
+
+    # Normalize displayed powers so the highest is 100
+    max_high_power = segment_power[high_idx].max() if np.any(high_idx) else 1.0
 
     # 3.6) Plot the full signal and mark high-power windows
     import matplotlib.pyplot as plt
@@ -210,7 +213,8 @@ def main():
     # Add power labels at the center of each high-power window
     for idx, t0 in enumerate(high_times):
         power = segment_power[high_idx][idx]
-        plt.text(t0, plt.ylim()[1]*0.9, f"{power:.2f}",
+        norm_power = (power / max_high_power) * 100.0
+        plt.text(t0, plt.ylim()[1]*0.9, f"{norm_power:.1f}",
                  ha='center', va='top', fontsize=8, color='black',
                  backgroundcolor='white', alpha=0.6)
     plt.xlabel('Time (s)')
