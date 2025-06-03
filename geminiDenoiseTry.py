@@ -645,6 +645,134 @@ def main():
                                 pulse_starts_refined, pulse_ends_refined, 
                                 stim_start_time, stim_end_time)
         
+        # ... (previous code in main, including visualize_pulse_detection)
+
+        # 8) Apply Cubic Spline Interpolation to all channels
+        print(f"\nApplying Cubic Spline Interpolation...")
+        print(f"Using refined pulse boundaries from channel {channel_idx} for all channels.")
+        print(f"Number of pulses to interpolate: {len(pulse_starts_refined)}")
+
+        # The 'data' variable holds all channel data (channels x samples)
+        # pulse_starts_refined and pulse_ends_refined are from the single channel analysis ('signal')
+        # These artifact times will be applied to all channels in 'data' by the spline function.
+        # You can adjust buffer_ms as needed.
+        corrected_data_all_channels = spline_artifact_extended_anchors(
+            data,  # Full data array (n_channels, n_samples)
+            pulse_starts_refined,
+            pulse_ends_refined,
+            sfreq,
+            buffer_ms=5.0  # Buffer in milliseconds for anchor points
+        )
+        print("Cubic spline interpolation complete.")
+
+        # Store the corrected data in the results dictionary if you're using it
+        if 'results' not in locals(): # or however you manage your results dictionary
+            results = {}
+        results['corrected_data_all_channels'] = corrected_data_all_channels
+        if data.ndim > 1 and channel_idx < data.shape[0]:
+            results['corrected_data_channel_selected'] = corrected_data_all_channels[channel_idx]
+        elif data.ndim == 1:
+             results['corrected_data_channel_selected'] = corrected_data_all_channels
+
+
+
+        # 9) Visualize the effect of spline interpolation on the selected channel
+        print(f"Visualizing spline interpolation result for channel {channel_idx}...")
+
+        if data.ndim > 1:
+            original_signal_selected_channel = data[channel_idx]
+            # Ensure corrected_data_all_channels is not None and has the channel
+            if corrected_data_all_channels is not None and channel_idx < corrected_data_all_channels.shape[0]:
+                 corrected_signal_selected_channel = corrected_data_all_channels[channel_idx]
+            else:
+                print(f"Warning: Could not retrieve corrected data for channel {channel_idx}. Skipping visualization.")
+                corrected_signal_selected_channel = None # or handle error
+        elif data.ndim == 1: # If data was 1D to begin with
+            original_signal_selected_channel = data
+            corrected_signal_selected_channel = corrected_data_all_channels
+        else:
+            print("Error: Data has unexpected dimensions. Skipping visualization.")
+            original_signal_selected_channel = None
+            corrected_signal_selected_channel = None
+
+        if original_signal_selected_channel is not None and corrected_signal_selected_channel is not None:
+            num_samples_viz = len(original_signal_selected_channel)
+            times_viz = np.arange(num_samples_viz) / sfreq
+
+            plt.figure(figsize=(18, 8)) # Adjusted for potentially more detail
+
+            # Define a window for plotting, e.g., around the stimulation period
+            # Use a slightly wider window than just stim_start_time to stim_end_time for context
+            # Handle cases where stim_start_time or stim_end_time might be None
+            plot_window_padding = 0.5 # seconds
+            if stim_start_time is not None and stim_end_time is not None :
+                vis_start_time = stim_start_time - plot_window_padding
+                vis_end_time = stim_end_time + plot_window_padding
+            elif len(pulse_starts_refined) > 0: # Fallback to first/last pulse
+                vis_start_time = (pulse_starts_refined[0] / sfreq) - plot_window_padding
+                vis_end_time = (pulse_ends_refined[-1] / sfreq) + plot_window_padding
+            else: # Fallback to full signal if no other info
+                vis_start_time = times_viz[0]
+                vis_end_time = times_viz[-1]
+
+
+            plot_start_idx = max(0, int(vis_start_time * sfreq))
+            plot_end_idx = min(num_samples_viz, int(vis_end_time * sfreq))
+
+            if plot_start_idx >= plot_end_idx and num_samples_viz > 0: # If range is invalid, plot a default portion
+                plot_start_idx = 0
+                plot_end_idx = min(num_samples_viz, int(sfreq * 10)) # e.g., first 10 seconds or whole signal
+
+            # Plot original signal in the window
+            plt.plot(times_viz[plot_start_idx:plot_end_idx],
+                     original_signal_selected_channel[plot_start_idx:plot_end_idx],
+                     label=f'Original Channel {channel_idx} (Ch Index {raw.ch_names[channel_idx] if isinstance(raw, mne.io.BaseRaw) and channel_idx < len(raw.ch_names) else channel_idx})',
+                     color='gray', alpha=0.6, linewidth=1.0)
+
+            # Plot corrected signal in the window
+            plt.plot(times_viz[plot_start_idx:plot_end_idx],
+                     corrected_signal_selected_channel[plot_start_idx:plot_end_idx],
+                     label=f'Corrected Channel {channel_idx} (Spline)', color='blue', linewidth=1.2, alpha=0.8)
+
+            # Highlight the interpolated segments on the corrected signal
+            print(f"Highlighting {len(pulse_starts_refined)} interpolated segments for channel {channel_idx} in visualization.")
+            first_interp_label = True
+            for i in range(len(pulse_starts_refined)):
+                start_sample = pulse_starts_refined[i]
+                end_sample = pulse_ends_refined[i] # This is the last sample *of* the artifact
+
+                # Determine the part of the pulse that is within the current plot window
+                seg_display_start = max(plot_start_idx, start_sample)
+                seg_display_end = min(plot_end_idx, end_sample + 1) # +1 for Python slicing up to end_sample
+
+                if seg_display_start < seg_display_end: # If the segment is visible in the plot window
+                    times_segment = times_viz[seg_display_start:seg_display_end]
+                    data_segment = corrected_signal_selected_channel[seg_display_start:seg_display_end]
+                    
+                    if len(times_segment) > 0 and len(data_segment) > 0:
+                         plt.plot(times_segment, data_segment, color='red', linewidth=1.5,
+                                 label='Interpolated Segment' if first_interp_label else "",
+                                 zorder=5) # zorder to draw on top
+                         first_interp_label = False
+
+
+            plt.title(f'Cubic Spline Interpolation for Channel {channel_idx} ({raw.ch_names[channel_idx] if isinstance(raw, mne.io.BaseRaw) and channel_idx < len(raw.ch_names) else ""})', fontsize=14)
+            plt.xlabel('Time (s)', fontsize=12)
+            plt.ylabel('Amplitude', fontsize=12)
+
+            if plot_start_idx < plot_end_idx and len(times_viz) > max(plot_start_idx, plot_end_idx-1) :
+                plt.xlim(times_viz[plot_start_idx], times_viz[plot_end_idx-1])
+                plt.legend(loc='upper right')
+                plt.grid(True, linestyle=':', alpha=0.7)
+                plt.tight_layout()
+                plt.show()
+            else:
+                print(f"Skipping visualization for channel {channel_idx} due to missing data.")
+
+            # ... (rest of your main function, e.g., updating and returning the results dictionary)
+            if 'results' in locals() and original_signal_selected_channel is not None:
+                results['original_signal_selected_channel'] = original_signal_selected_channel
+            # The corrected data for selected channel and all channels are already added to results earlier
 
         correctedData = spline_artifact_extended_anchors(data, pulse_starts_refined, pulse_ends_refined, sfreq)
         # Assuming 'correctedData' is your (n_channels, n_samples) array
