@@ -36,60 +36,106 @@ def select_fif_file():
         print("No file selected by user.")
         return None
     return path
-
-def compute_mean_psd(data, sfreq, bandwidth=0.5):
-    """Compute mean PSD across channels"""
+    
+def compute_psd_multitaper_for_channels(data_channels, sfreq, bandwidth=0.5):
+    """
+    Compute PSD for one or more channels using multitaper method.
+    If multiple channels are provided (e.g., data_channels.ndim == 2 and data_channels.shape[0] > 1),
+    it computes PSD for each and returns a matrix of PSDs and the common frequency axis.
+    If a single channel is provided (1D array), it computes and returns its PSD.
+    """
+    if data_channels.ndim == 1: # Single channel data
+        data_channels = data_channels.reshape(1, -1) # MNE expects 2D
+    
     psd_list = []
-    for idx in range(data.shape[0]):
-        total_ch = data.shape[0]
-        print(f"Channel {idx+1}/{total_ch}'s PSD is being calculated")
+    freqs_common = None
+    for idx in range(data_channels.shape[0]):
+        # print(f"  Calculating PSD for channel {idx+1}/{data_channels.shape[0]}...")
         psd_ch, freqs = psd_array_multitaper(
-            data[idx:idx+1], sfreq=sfreq, fmin=1.0, fmax=sfreq/2,
+            data_channels[idx:idx+1], sfreq=sfreq, fmin=1.0, fmax=sfreq/2,
             bandwidth=bandwidth, adaptive=False, low_bias=True,
             normalization='full', verbose=False
         )
         psd_list.append(psd_ch[0])
-    psds = np.vstack(psd_list)
-    return psds.mean(axis=0), freqs
+        if freqs_common is None:
+            freqs_common = freqs
+            
+    psds_matrix = np.vstack(psd_list)
+    
+    if psds_matrix.shape[0] == 1: # If it was a single channel input
+        return psds_matrix[0], freqs_common # Return 1D PSD
+    return psds_matrix, freqs_common
 
-def find_stim_frequency(mean_psd, freqs, prominence=20, min_freq=0):
-    """Find stimulation frequency from PSD peaks"""
-    peaks, props = find_peaks(mean_psd, prominence=prominence)
+def find_stim_frequency_from_psd(psd_data, freqs, prominence_abs, min_freq_hz, rel_prom_thresh=0.5, return_all_props=False):
+    """Find stimulation frequency from PSD peaks, optionally returning all properties."""
+    peaks, props = find_peaks(psd_data, prominence=prominence_abs)
     if len(peaks) == 0:
-        raise ValueError(f"No peaks found with prominence ≥ {prominence}")
+        # raise ValueError(f"No peaks found with prominence ≥ {prominence_abs}")
+        print(f"Warning: No peaks found with absolute prominence ≥ {prominence_abs}")
+        return (None, None, None, None) if return_all_props else None
 
     pfreqs = freqs[peaks]
     proms = props['prominences']
-    heights = mean_psd[peaks]
+    heights = psd_data[peaks] # Corrected: use psd_data instead of undefined mean_psd
     rel_proms = proms / heights
 
-    mask_freq = pfreqs >= min_freq
+    mask_freq = pfreqs >= min_freq_hz # Corrected: use min_freq_hz parameter
     if not np.any(mask_freq): # Check if any peaks remain after frequency filter
-        raise ValueError(f"No peaks found above {min_freq} Hz with prominence ≥ {prominence} (initial count: {len(pfreqs)})")
+        # raise ValueError(f"No peaks found above {min_freq_hz} Hz with prominence ≥ {prominence_abs} (initial count: {len(pfreqs)})")
+        print(f"Warning: No peaks found above {min_freq_hz} Hz with prominence ≥ {prominence_abs}")
+        return (None, None, None, None) if return_all_props else None
 
     pfreqs = pfreqs[mask_freq]
     proms = proms[mask_freq]
     rel_proms = rel_proms[mask_freq]
     heights = heights[mask_freq]
 
+    # print(f"Peaks ≥ {min_freq_hz} Hz with abs prom ≥ {prominence_abs}:")
+    #for f, p, rp, h in zip(pfreqs, proms, rel_proms, heights):
+        # print(f"  {f:.2f} Hz → abs prom {p:.4f}, rel prom {rp:.4f}, height {h:.4f}")
 
-    print(f"Peaks ≥ {min_freq} Hz with abs prom ≥ {prominence}:")
-    for f, p, rp, h in zip(pfreqs, proms, rel_proms, heights):
-        print(f"  {f:.2f} Hz → abs prom {p:.4f}, rel prom {rp:.4f}, height {h:.4f}")
-
-    # Select the lowest-frequency peak with relative prominence ≥ 0.5 (or highest if none meet criteria)
-    mask_rel = rel_proms >= 0.5
+    mask_rel = rel_proms >= rel_prom_thresh
     if not np.any(mask_rel):
-        print("No peaks met relative prominence threshold of 0.5. Considering all valid peaks.")
-        # Fallback: consider all peaks that passed frequency and absolute prominence filters
-        # Could choose the one with max absolute prominence, or lowest frequency still.
-        # For now, let's stick to lowest frequency among the initially filtered ones.
-        stim_freq = np.min(pfreqs) # pfreqs is already filtered by min_freq and prominence
+        print(f"Warning: No peaks met relative prominence threshold of {rel_prom_thresh}. Trying with any valid peak.")
+        if len(pfreqs) > 0: # If any peaks passed abs prominence and min_freq
+            stim_freq = np.min(pfreqs) # Fallback to lowest freq among these
+            idx = np.argmin(pfreqs)
+        else:
+            return (None, None, None, None) if return_all_props else None
     else:
         valid_freqs_for_stim = pfreqs[mask_rel]
         stim_freq = np.min(valid_freqs_for_stim)
+        idx = np.where(pfreqs == stim_freq)[0][0] # Get index relative to pfreqs
 
+    if return_all_props:
+        return stim_freq, pfreqs[idx], proms[idx], rel_proms[idx]
     return stim_freq
+
+def get_peak_properties_around_freq(psd_data, freqs, target_freq, tolerance_hz, min_abs_prominence):
+    """
+    Finds a peak in psd_data near target_freq and returns its properties (freq, rel_prom, abs_prom),
+    prioritizing highest relative prominence if multiple peaks are in the window.
+    Returns: (peak_freq, rel_prom, abs_prom) or (None, -1, -1) if no suitable peak.
+    """
+    peaks_indices, props = find_peaks(psd_data, prominence=min_abs_prominence)
+    if len(peaks_indices) == 0: return None, -1.0, -1.0
+
+    found_peak_freqs = freqs[peaks_indices]
+    found_peak_abs_proms = props['prominences']
+    found_peak_heights = psd_data[peaks_indices]
+    found_peak_heights[found_peak_heights <= 1e-9] = 1e-9 # Avoid division by zero
+    found_peak_rel_proms = found_peak_abs_proms / found_peak_heights
+
+    freq_diff = np.abs(found_peak_freqs - target_freq)
+    peaks_in_window_mask = freq_diff <= tolerance_hz
+    
+    if not np.any(peaks_in_window_mask): return None, -1.0, -1.0
+
+    freqs_in_window = found_peak_freqs[peaks_in_window_mask]
+    rel_proms_in_window = found_peak_rel_proms[peaks_in_window_mask]
+    abs_proms_in_window = found_peak_abs_proms[peaks_in_window_mask]
+    best_idx_in_window = np.argmax(rel_proms_in_window) # Prioritize highest relative prominence
+    return freqs_in_window[best_idx_in_window], rel_proms_in_window[best_idx_in_window], abs_proms_in_window[best_idx_in_window]
 
 # --- NEW FUNCTIONS for template detection and pulse finding ---
 
@@ -135,13 +181,14 @@ def detect_stim_epochs(signal, sfreq, stim_freq):
     return stim_start_time, stim_end_time
 
 
-def find_template_pulse(signal, sfreq, stim_freq, stim_start_time, stim_end_time):
+def find_template_pulse(signal, sfreq, stim_freq, stim_start_time, stim_end_time, template_width_factor=1.0):
     """
     Find the best template pulse within the stimulation period.
-    The template is centered around its peak and has width 1/stim_freq.
+    The template is centered around its peak.
+    `template_width_factor` scales the nominal period (1/stim_freq) to define template width.
     Returns: template, template_start_idx (abs first sample), template_length (samples)
     """
-    start_idx_stim_period = int(stim_start_time * sfreq)
+    start_idx_stim_period = int(stim_start_time * sfreq) # TODO: Add print statements here
     end_idx_stim_period = int(stim_end_time * sfreq)
     start_idx_stim_period = max(0, start_idx_stim_period)
     end_idx_stim_period = min(len(signal), end_idx_stim_period)
@@ -151,10 +198,11 @@ def find_template_pulse(signal, sfreq, stim_freq, stim_start_time, stim_end_time
 
     stim_signal = signal[start_idx_stim_period:end_idx_stim_period]
     period_samples = int(sfreq / stim_freq)
+    template_duration_samples = int(period_samples * template_width_factor)
+    template_duration_samples = max(1, template_duration_samples) # Ensure at least 1 sample
+
     if period_samples <= 0:
         raise ValueError(f"Period_samples must be positive. Got {period_samples}.")
-
-    template_duration_samples = period_samples
 
     if template_duration_samples > len(stim_signal):
         print(f"Warning: stim_signal (len {len(stim_signal)}) shorter than template_duration ({template_duration_samples}). Using full stim_signal.")
@@ -416,22 +464,6 @@ def visualize_pulse_detection(signal, sfreq, stim_freq, template, template_start
 
 
 def spline_artifact_extended_anchors(data, artifact_starts, artifact_ends, sfreq, buffer_ms=5.0):
-    """
-    Replaces identified artifacts using cubic spline interpolation.
-    Attempts to anchor the spline on data *outside* the artifact segment
-    (defined by start_artifact and end_artifact) for smoother interpolation.
-    The anchors are chosen based on `buffer_ms` around the segment.
-    If external anchors are not possible (e.g., artifact at signal edge),
-    it falls back to using points immediately adjacent to or at the boundaries
-    of the artifact segment.
-
-    Args:
-        data (np.ndarray): 1D or 2D (channels x samples).
-        artifact_starts (np.ndarray): 1D array of artifact start indices (inclusive).
-        artifact_ends (np.ndarray): 1D array of artifact end indices (inclusive).
-        sfreq (float): Sampling frequency.
-        buffer_ms (float): Buffer for anchor points.
-    """
     if not isinstance(data, np.ndarray): raise TypeError("Input 'data' must be a NumPy array.")
     if sfreq <= 0: raise ValueError("sfreq must be positive.")
     if not (isinstance(artifact_starts, np.ndarray) and isinstance(artifact_ends, np.ndarray)):
@@ -470,10 +502,7 @@ def spline_artifact_extended_anchors(data, artifact_starts, artifact_ends, sfreq
                     if not use_extended and buffer_samples > 0: print(f"  Info: Art {i_stim+1} fallback to immediate pre/post anchors.")
                 else:
                     x_known = np.array([start_artifact, end_artifact]) # True fallback
-                    print(f"  Info: Art {i_stim+1} (Ch {i_chan+1}) TRUE FALLBACK to artifact boundary anchors for segment [{start_artifact}, {end_artifact}].")
-                    print(f"    This occurs if anchors outside the segment [{start_artifact}, {end_artifact}] cannot be found (e.g., segment is at signal start/end).")
-                    print(f"    Points at start_artifact ({start_artifact}) and end_artifact ({end_artifact}) will retain original values.")
-                    # if not use_extended and buffer_samples > 0: print(f"  Info: Art {i_stim+1} (Ch {i_chan+1}) fallback to artifact boundary anchors for segment [{start_artifact}, {end_artifact}].")
+                    if not use_extended and buffer_samples > 0: print(f"  Info: Art {i_stim+1} fallback to artifact boundary anchors.")
             
             if x_known[0] >= x_known[1] and not (x_known[0] == x_known[1] and start_artifact == end_artifact):
                  print(f"  Warn: Art {i_stim+1} anchors ({x_known[0]},{x_known[1]}) not distinct/increasing. Skip."); continue
@@ -497,336 +526,124 @@ def spline_artifact_extended_anchors(data, artifact_starts, artifact_ends, sfreq
     return spline_data.squeeze() if is_1d_input else spline_data
 
 
-def _load_and_prepare_data(filepath=None):
-    """Loads FIF file and prepares initial data structures."""
-    results = {}
-    if filepath is None or not os.path.exists(filepath):
-        print(f"Filepath '{filepath}' not provided or not found. Opening dialog...")
-        filepath = select_fif_file()
-        if not filepath:
-            print("No file selected. Exiting.")
-            return None, None, None, None, None # Indicate failure
-
-    raw = mne.io.read_raw_fif(filepath, preload=True)
-    sfreq = raw.info['sfreq']
-    all_channels_data = raw.get_data()
-    ch_names = raw.ch_names
-
-    if all_channels_data.shape[0] == 0:
-        raise ValueError("No data channels in file.")
-
-    results['sfreq'] = sfreq
-    results['filepath'] = filepath
-    print(f"Data loaded: {all_channels_data.shape[0]} channels, {all_channels_data.shape[1]} samples. SFreq: {sfreq} Hz.")
-    return raw, sfreq, all_channels_data, ch_names, results
-
-
-def _determine_analysis_channel_and_stim_freq(all_channels_data, ch_names, sfreq, results):
-    """Determines the channel for analysis and estimates stimulation frequency."""
-    # Simplified channel selection for now, can be expanded
-    # Example: Ask user for channel index
-    # temp_root = tk.Tk(); temp_root.withdraw() 
-    # channel_idx_str = simpledialog.askstring("Input", f"Enter channel index for analysis (0-{all_channels_data.shape[0]-1}):", parent=temp_root)
-    # temp_root.destroy()
-    # try:
-    #     channel_idx_for_analysis = int(channel_idx_str) if channel_idx_str else 8 # Default if empty
-    # except (ValueError, TypeError):
-    #     print("Invalid channel index input, defaulting to 8.")
-    #     channel_idx_for_analysis = 8
-    
-    channel_idx_for_analysis = 8 # Defaulting to channel 8 for now
-
-    if not (0 <= channel_idx_for_analysis < all_channels_data.shape[0]):
-        print(f"Warning: Channel index {channel_idx_for_analysis} out of bounds for {all_channels_data.shape[0]} channels. Using channel 0.")
-        channel_idx_for_analysis = 0
-    
-    print(f"Using channel {channel_idx_for_analysis} ({ch_names[channel_idx_for_analysis]}) for initial artifact detection.")
-    signal_for_detection = all_channels_data[channel_idx_for_analysis].copy()
-
-    psd_ch, freqs = compute_mean_psd(signal_for_detection.reshape(1, -1), sfreq) # compute_mean_psd expects 2D
-    stim_freq = find_stim_frequency(psd_ch, freqs, prominence=10, min_freq=10) # Tune these
-    
-    results['stim_freq'] = stim_freq
-    results['analysis_channel_idx'] = channel_idx_for_analysis
-    results['analysis_channel_name'] = ch_names[channel_idx_for_analysis]
-    print(f"Estimated stim_freq: {stim_freq:.2f} Hz on channel {channel_idx_for_analysis}")
-    
-    return signal_for_detection, stim_freq, channel_idx_for_analysis, results
-
-
-def _detect_and_refine_pulses(signal_for_detection, sfreq, stim_freq, results):
-    """Detects stimulation epochs, finds template, cross-correlates, and refines pulses."""
-    print("\nDetecting stimulation epochs...")
-    stim_start_t, stim_end_t = detect_stim_epochs(signal_for_detection, sfreq, stim_freq)
-    results['stim_start_time'] = stim_start_t
-    results['stim_end_time'] = stim_end_t
-    print(f"Stim period: {stim_start_t:.3f}s to {stim_end_t:.3f}s")
-
-    print("\nFinding template pulse...")
-    template, template_start_idx, template_len = find_template_pulse(
-        signal_for_detection, sfreq, stim_freq, stim_start_t, stim_end_t)
-    results['template'] = template
-    results['template_start_idx'] = template_start_idx
-    results['template_duration_samples'] = template_len
-
-    print("\nPerforming cross-correlation...")
-    p_starts, p_ends, corr_scores = cross_correlate_pulses(
-        signal_for_detection, template, sfreq, stim_freq, stim_start_t, stim_end_t)
-    results['correlation_scores'] = corr_scores
-    if len(p_starts) == 0:
-        print("No pulses from cross-correlation. Cannot proceed with refinement.")
-        # Ensure these keys exist even if empty
-        results['pulse_starts_refined'] = np.array([])
-        results['pulse_ends_refined'] = np.array([])
-        results['pulse_durations_sec'] = np.array([])
-        results['pulse_times_sec'] = np.array([])
-        return np.array([]), np.array([]), template, template_start_idx, stim_start_t, stim_end_t, results
-
-    print("\nRefining pulse boundaries...")
-    p_starts_ref, p_ends_ref = refine_pulse_boundaries(
-        signal_for_detection, p_starts, p_ends, sfreq, stim_freq)
-    
-    if len(p_starts_ref) == 0:
-        print("No pulses after refinement. Using unrefined if available.")
-        p_starts_ref, p_ends_ref = (p_starts, p_ends) if len(p_starts) > 0 else (np.array([]), np.array([]))
-    
-    results['pulse_starts_refined'] = p_starts_ref
-    results['pulse_ends_refined'] = p_ends_ref
-    if len(p_starts_ref) > 0:
-        results['pulse_durations_sec'] = (p_ends_ref - p_starts_ref + 1) / sfreq
-        results['pulse_times_sec'] = p_starts_ref / sfreq
-    else:
-        results['pulse_durations_sec'] = np.array([])
-        results['pulse_times_sec'] = np.array([])
-        
-    return p_starts_ref, p_ends_ref, template, template_start_idx, stim_start_t, stim_end_t, results
-
-
-def _adjust_ends_for_contiguous_spline(p_starts_ref, p_ends_ref, sfreq, results):
-    """Adjusts pulse end times for contiguous spline interpolation."""
-    original_p_ends_ref = np.copy(p_ends_ref) # Keep a copy for reference if needed
-    p_ends_for_spline = np.copy(p_ends_ref)
-
-    try:
-        if len(p_starts_ref) > 1: # Need at least two pulses to make adjustments between them
-            print("\nAdjusting pulse end times for spline interpolation to ensure contiguous regions (start-to-start)...")
-            for i in range(len(p_starts_ref) - 1): # Iterate up to the second to last pulse
-                current_pulse_start = p_starts_ref[i]
-                next_pulse_start = p_starts_ref[i+1]
-                
-                # New end for the current pulse's interpolation region is one sample
-                # before the start of the next pulse's interpolation region.
-                adjusted_end = next_pulse_start - 1
-                
-                # Sanity check: Ensure the adjusted end is not before the current pulse's start.
-                # This could happen if pulse detections are overlapping or not correctly ordered.
-                if adjusted_end < current_pulse_start:
-                    print(f"  Warning: For pulse {i} (start: {current_pulse_start}), "
-                          f"the next pulse starts too soon ({next_pulse_start}).")
-                    print(f"  Cannot make fully contiguous without overlap or creating an invalid segment. "
-                          f"Using original refined end for this segment's spline: {p_ends_for_spline[i]}")
-                    # p_ends_for_spline[i] remains as original_p_ends_ref[i] in this case
-                else:
-                    p_ends_for_spline[i] = adjusted_end
-            
-            print(f"  Original refined ends (first 3 examples): {original_p_ends_ref[:min(3, len(original_p_ends_ref))]}")
-            print(f"  Adjusted ends for spline (first 3 examples): {p_ends_for_spline[:min(3, len(p_ends_for_spline))]}")
-        elif len(p_starts_ref) == 1:
-            print("\nOnly one pulse detected. Using original refined end times for spline interpolation.")
-        else: # 0 pulses
-            print("\nNo pulses detected; no adjustments for contiguity needed for spline.")
-
-    except Exception as e:
-        print(f"Error during spline end adjustment: {e}")
-        # Fallback to original refined ends if adjustment fails
-        p_ends_for_spline = original_p_ends_ref
-
-    results['pulse_ends_spline_adjusted'] = p_ends_for_spline
-    results['pulse_durations_spline_adjusted_sec'] = (p_ends_for_spline - p_starts_ref + 1) / sfreq if len(p_starts_ref) > 0 else np.array([])
-    return p_ends_for_spline, results
-
-
-def _apply_spline_interpolation_to_all_channels(all_channels_data, p_starts_ref, p_ends_for_spline, sfreq, results):
-    """Applies spline interpolation to all channels."""
-    print(f"\nApplying Spline Interpolation to ALL {all_channels_data.shape[0]} channels...")
-    corrected_data_all = spline_artifact_extended_anchors(
-        all_channels_data, p_starts_ref, p_ends_for_spline, sfreq, buffer_ms=5.0)
-    results['corrected_data_all_channels'] = corrected_data_all
-    print("Spline interpolation complete for all channels.")
-    return corrected_data_all, results
-
-
-def _visualize_spline_effect_on_channel(original_sig_selected, corrected_sig_selected, 
-                                     p_starts_ref, p_ends_for_spline, sfreq, 
-                                     channel_idx_for_analysis, ch_name_for_analysis,
-                                     stim_start_t, stim_end_t):
-    """Visualizes the effect of spline interpolation on a selected channel."""
-    print(f"\nVisualizing spline result for channel {channel_idx_for_analysis} ({ch_name_for_analysis})...")
-    times_v = np.arange(len(original_sig_selected)) / sfreq
-    plt.figure(figsize=(18, 7))
-
-    if len(p_starts_ref) > 0:
-        vis_start_spline_s = max(0, (p_starts_ref[0] / sfreq) - 0.1)
-        num_pulses_to_show = min(len(p_starts_ref), 5)
-        vis_end_spline_s = min(times_v[-1], (p_ends_for_spline[num_pulses_to_show-1] / sfreq) + 0.1)
-    else:
-        vis_start_spline_s = stim_start_t - 0.1 if stim_start_t is not None else 0
-        vis_end_spline_s = stim_end_t + 0.1 if stim_end_t is not None else min(times_v[-1] if len(times_v)>0 else 2, 2.0)
-
-    plot_start_idx_s = max(0, int(vis_start_spline_s * sfreq))
-    plot_end_idx_s = min(len(original_sig_selected), int(vis_end_spline_s * sfreq))
-    
-    if plot_start_idx_s >= plot_end_idx_s and len(original_sig_selected) > 0 :
-        plot_start_idx_s = 0; plot_end_idx_s = min(len(original_sig_selected), int(sfreq * 2))
-
-    plt.plot(times_v[plot_start_idx_s:plot_end_idx_s],
-             original_sig_selected[plot_start_idx_s:plot_end_idx_s],
-             label=f'Original Ch {channel_idx_for_analysis} ({ch_name_for_analysis})', color='dimgray', alpha=0.7, lw=1.0)
-    plt.plot(times_v[plot_start_idx_s:plot_end_idx_s],
-             corrected_sig_selected[plot_start_idx_s:plot_end_idx_s],
-             label=f'Corrected Ch {channel_idx_for_analysis} ({ch_name_for_analysis})', color='dodgerblue', lw=1.2, alpha=0.9)
-
-    first_label = True
-    for i in range(len(p_starts_ref)):
-        s_spline = p_starts_ref[i]
-        e_spline = p_ends_for_spline[i]
-        seg_disp_start = max(plot_start_idx_s, s_spline)
-        seg_disp_end = min(plot_end_idx_s, e_spline + 1)
-        if seg_disp_start < seg_disp_end:
-            ts, ds = times_v[seg_disp_start:seg_disp_end], corrected_sig_selected[seg_disp_start:seg_disp_end]
-            if len(ts) > 0:
-                 plt.plot(ts, ds, color='red', lw=1.8, label='Interpolated' if first_label else "", zorder=5)
-                 first_label = False
-    plt.title(f'Spline Interpolation Effect on Channel {channel_idx_for_analysis} ({ch_name_for_analysis})', fontsize=14)
-    plt.xlabel('Time (s)'); plt.ylabel('Amplitude')
-    if plot_start_idx_s < plot_end_idx_s and len(times_v)>max(plot_start_idx_s, plot_end_idx_s-1):
-        plt.xlim(times_v[plot_start_idx_s], times_v[plot_end_idx_s-1 if plot_end_idx_s > 0 else 0])
-    plt.legend(loc='upper right'); plt.grid(True, linestyle=':', alpha=0.6); plt.tight_layout(); plt.show()
-
-
-def _print_final_summary(results):
-    """Prints the final analysis summary."""
-    if results and results.get('pulse_times_sec', np.array([])).size > 0:
-        print("\n--- Analysis Summary ---")
-        print(f"File: {results.get('filepath', 'N/A')}")
-        print(f"Analysis Channel: {results.get('analysis_channel_idx', 'N/A')} ({results.get('analysis_channel_name', 'N/A')})")
-        print(f"Stim Freq: {results.get('stim_freq', 'N/A'):.2f} Hz")
-        print(f"# Pulses refined: {len(results['pulse_starts_refined'])}")
-        print(f"First 5 pulse starts (refined) (s): {np.round(results['pulse_times_sec'][:5], 4)}")
-        print(f"First 5 pulse durations (refined) (s): {np.round(results['pulse_durations_sec'][:5], 4)}")
-        if 'pulse_durations_spline_adjusted_sec' in results and len(results['pulse_durations_spline_adjusted_sec']) > 0:
-            print(f"First 5 pulse durations (for spline) (s): {np.round(results['pulse_durations_spline_adjusted_sec'][:5], 4)}")
-        if 'corrected_data_all_channels' in results and results['corrected_data_all_channels'] is not None:
-            print(f"Corrected data shape: {results['corrected_data_all_channels'].shape}")
-        print("Pipeline completed.")
-    elif results:
-        print("\nPipeline completed with partial or no pulse results.")
-        print(f"File: {results.get('filepath', 'N/A')}")
-        print(f"Analysis Channel: {results.get('analysis_channel_idx', 'N/A')} ({results.get('analysis_channel_name', 'N/A')})")
-        print(f"Stim Freq: {results.get('stim_freq', 'N/A'):.2f} Hz" if results.get('stim_freq') else "Stim Freq: N/A")
-    else:
-        print("Pipeline failed or exited early.")
-
-
 def main():
-    """Main pipeline orchestrator."""
     results = {}
     try:
-        # Step 1: Load and Prepare Data
-        raw, sfreq, all_channels_data, ch_names, results = _load_and_prepare_data(results.get('filepath')) # Pass previous path if any
-        if raw is None: return None # Loading failed
-
-        # Step 2: Determine Analysis Channel and Stimulation Frequency
-        signal_for_detection, stim_freq, channel_idx_for_analysis, results = \
-            _determine_analysis_channel_and_stim_freq(all_channels_data, ch_names, sfreq, results)
-
-        # Step 3: Detect and Refine Pulses
-        p_starts_ref, p_ends_ref, template, template_start_idx, stim_start_t, stim_end_t, results = \
-            _detect_and_refine_pulses(signal_for_detection, sfreq, stim_freq, results)
-        
-        if len(p_starts_ref) == 0:
-            print("No pulses detected or refined. Cannot proceed with spline interpolation or full visualization.")
-            return results # Return partial results
-
-        # Step 4: Visualize Pulse Detection
-        visualize_pulse_detection(signal_for_detection, sfreq, stim_freq, template, template_start_idx,
-                                p_starts_ref, p_ends_ref, stim_start_t, stim_end_t)
-
-        # Step 5: Adjust Pulse Ends for Contiguous Spline
-        p_ends_for_spline, results = _adjust_ends_for_contiguous_spline(p_starts_ref, p_ends_ref, sfreq, results)
-
-        # Step 6: Apply Spline Interpolation
-        corrected_data_all, results = _apply_spline_interpolation_to_all_channels(
-            all_channels_data, p_starts_ref, p_ends_for_spline, sfreq, results)
-
-        # Step 7: Visualize Spline Effect
-        original_sig_selected = all_channels_data[channel_idx_for_analysis]
-        corrected_sig_selected = corrected_data_all[channel_idx_for_analysis] if corrected_data_all.ndim == 2 else corrected_data_all
-        _visualize_spline_effect_on_channel(original_sig_selected, corrected_sig_selected,
-                                          p_starts_ref, p_ends_for_spline, sfreq,
-                                          channel_idx_for_analysis, ch_names[channel_idx_for_analysis],
-                                          stim_start_t, stim_end_t)
-        return results
-
-    except Exception as e:
-        print(f"Error in main pipeline: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        return results # Return partial results if any
-
-if __name__ == "__main__":
-    analysis_results = main()
-    _print_final_summary(analysis_results)
-
-
-# Original main function content, now largely refactored:
-"""
-def main_original_structure():
-    results = {}
-    try:
-        default_path = '' 
+        default_path = '' # Provide a default path if desired, e.g. from previous run
+        # path = default_path # Uncomment to use default without asking if it exists
+        # For first time use or if you always want to select:
         path = select_fif_file()
-        if not path: print("No file selected. Exiting."); return None
-        
-        channel_idx_for_analysis = 8 
+        if not path: 
+            print("No file selected. Exiting.")
+            return None
+        print(f"Loading data from: {path}")
 
         raw = mne.io.read_raw_fif(path, preload=True)
         sfreq = raw.info['sfreq']; results['sfreq'] = sfreq
-        data = raw.get_data()
-        if data.shape[0] == 0: raise ValueError("No data channels in file.")
+        all_channels_data = raw.get_data()
+        ch_names = raw.ch_names
+        if all_channels_data.shape[0] == 0: raise ValueError("No data channels in file.")
+        print(f"Data loaded: {all_channels_data.shape[0]} channels, {all_channels_data.shape[1]} samples. SFreq: {sfreq} Hz.")
+
+        # --- Automatic Channel Selection and Stim Freq Refinement ---
+        print("\nCalculating PSD for all channels...")
+        all_psds_matrix, freqs_common = compute_psd_multitaper_for_channels(all_channels_data, sfreq)
         
-        if not (0 <= channel_idx_for_analysis < data.shape[0]):
-            print(f"Warn: Chan {channel_idx_for_analysis} out of bounds ({data.shape[0]} chans). Using 0.")
-            channel_idx_for_analysis = 0
-        print(f"Using channel {channel_idx_for_analysis} ({raw.ch_names[channel_idx_for_analysis]}) for initial detection.")
-        signal_for_detection = data[channel_idx_for_analysis].copy()
+        print("Estimating initial stimulation frequency from mean PSD...")
+        mean_psd_overall = np.mean(all_psds_matrix, axis=0)
+        # Parameters for initial stim freq estimation
+        initial_stim_freq = find_stim_frequency_from_psd(mean_psd_overall, freqs_common, prominence_abs=5, min_freq_hz=10, rel_prom_thresh=0.3)
 
-        psd_ch, freqs = compute_mean_psd(signal_for_detection.reshape(1, -1), sfreq)
-        stim_freq = find_stim_frequency(psd_ch, freqs, prominence=10, min_freq=10) 
-        results['stim_freq'] = stim_freq; print(f"Est. stim_freq: {stim_freq:.2f} Hz")
+        if initial_stim_freq is None:
+            print("Could not automatically determine initial stimulation frequency from mean PSD.")
+            # Optionally, prompt user here or raise error
+            initial_stim_freq_str = simpledialog.askstring("Input", "Could not auto-detect initial stim freq. Enter estimated stim frequency (Hz):")
+            if initial_stim_freq_str: initial_stim_freq = float(initial_stim_freq_str)
+            else: raise ValueError("Stimulation frequency required.")
+        print(f"Initial estimated stim frequency: {initial_stim_freq:.2f} Hz")
 
-        stim_start_t, stim_end_t = detect_stim_epochs(signal_for_detection, sfreq, stim_freq)
+        print("\nIdentifying clearest channel for stimulation artifact...")
+        best_channel_idx = -1
+        max_rel_prom_clarity = -1.0
+        actual_freq_on_best_channel = None
+
+        for i_ch in range(all_channels_data.shape[0]):
+            psd_this_channel = all_psds_matrix[i_ch]
+            peak_freq, rel_prom, abs_prom = get_peak_properties_around_freq(
+                psd_this_channel, freqs_common, 
+                target_freq=initial_stim_freq, 
+                tolerance_hz=5.0,  # How far from initial_stim_freq to look
+                min_abs_prominence=1 # Lower threshold for this specific check
+            )
+            if peak_freq is not None:
+                # print(f"  Ch {i_ch} ({ch_names[i_ch]}): Peak at {peak_freq:.2f} Hz, RelProm={rel_prom:.2f}, AbsProm={abs_prom:.2f}")
+                if rel_prom > max_rel_prom_clarity:
+                    max_rel_prom_clarity = rel_prom
+                    best_channel_idx = i_ch
+                    actual_freq_on_best_channel = peak_freq
+        
+        if best_channel_idx == -1:
+            print("Could not identify a clear channel for stimulation. Defaulting to channel 0.")
+            best_channel_idx = 0 # Fallback
+            # Or prompt user
+            # best_ch_idx_str = simpledialog.askstring("Input", f"Could not auto-detect clearest channel. Enter channel index (0-{all_channels_data.shape[0]-1}):")
+            # if best_ch_idx_str: best_channel_idx = int(best_ch_idx_str)
+            # else: raise ValueError("Channel index required.")
+
+        print(f"Clearest channel identified: Index {best_channel_idx} ({ch_names[best_channel_idx]}) with peak at ~{actual_freq_on_best_channel or initial_stim_freq:.2f} Hz.")
+        signal_for_analysis = all_channels_data[best_channel_idx].copy()
+
+        print("\nRefining stimulation frequency on clearest channel...")
+        psd_best_channel, _ = compute_psd_multitaper_for_channels(signal_for_analysis, sfreq)
+        # Parameters for final stim freq estimation (can be more stringent)
+        final_stim_freq = find_stim_frequency_from_psd(psd_best_channel, freqs_common, prominence_abs=10, min_freq_hz=max(5, (actual_freq_on_best_channel or initial_stim_freq) - 10), rel_prom_thresh=0.4)
+
+        if final_stim_freq is None:
+            print(f"Could not refine stim frequency on clearest channel. Using initial/best estimate: {actual_freq_on_best_channel or initial_stim_freq:.2f} Hz")
+            final_stim_freq = actual_freq_on_best_channel or initial_stim_freq
+            if final_stim_freq is None: # Still none
+                 final_stim_freq_str = simpledialog.askstring("Input", "Could not auto-detect final stim freq. Enter stim frequency (Hz):")
+                 if final_stim_freq_str: final_stim_freq = float(final_stim_freq_str)
+                 else: raise ValueError("Final stimulation frequency required.")
+
+        results['stim_freq'] = final_stim_freq
+        results['analysis_channel_idx'] = best_channel_idx
+        results['analysis_channel_name'] = ch_names[best_channel_idx]
+        print(f"Using final stim_freq: {final_stim_freq:.2f} Hz on channel {best_channel_idx} ({ch_names[best_channel_idx]}) for artifact processing.")
+
+        print("\nDetecting stimulation epochs...")
+        stim_start_t, stim_end_t = detect_stim_epochs(signal_for_analysis, sfreq, final_stim_freq)
         results['stim_start_time'] = stim_start_t; results['stim_end_time'] = stim_end_t
         print(f"Stim period: {stim_start_t:.3f}s to {stim_end_t:.3f}s")
 
+        # --- Modifiable Template Width ---
+        # To align pulse detection with checkcheck.py, the template width should match
+        # the nominal period (1/stim_freq). checkcheck.py effectively uses a factor of 1.0.
+        # Setting this to 1.0 ensures g4.py uses a template of the same nominal duration.
+        template_width_factor = 1.0
+        print(f"Using template width factor: {template_width_factor}")
+
+        print("\nFinding template pulse...")
         template, template_start_idx, template_len = find_template_pulse(
-            signal_for_detection, sfreq, stim_freq, stim_start_t, stim_end_t)
+            signal_for_analysis, sfreq, final_stim_freq, stim_start_t, stim_end_t, template_width_factor)
         results['template'] = template; results['template_start_idx'] = template_start_idx
         results['template_duration_samples'] = template_len
 
+        print("\nPerforming cross-correlation to find pulses...")
         p_starts, p_ends, corr_scores = cross_correlate_pulses(
-            signal_for_detection, template, sfreq, stim_freq, stim_start_t, stim_end_t)
+            signal_for_analysis, template, sfreq, final_stim_freq, stim_start_t, stim_end_t)
         results['correlation_scores'] = corr_scores
         if len(p_starts) == 0: print("No pulses from cross-correlation. Cannot proceed."); return results
 
+        print("\nRefining pulse boundaries...")
         p_starts_ref, p_ends_ref = refine_pulse_boundaries(
-            signal_for_detection, p_starts, p_ends, sfreq, stim_freq) 
+            signal_for_analysis, p_starts, p_ends, sfreq, final_stim_freq) # p_ends is not used by new logic
         if len(p_starts_ref) == 0:
             print("No pulses after refinement. Using unrefined if available.")
             p_starts_ref, p_ends_ref = (p_starts, p_ends) if len(p_starts)>0 else (np.array([]), np.array([]))
         
-        results['pulse_starts_refined'] = p_starts_ref 
-        results['pulse_ends_refined'] = p_ends_ref     
+        results['pulse_starts_refined'] = p_starts_ref # inclusive
+        results['pulse_ends_refined'] = p_ends_ref     # inclusive
         if len(p_starts_ref)>0:
             results['pulse_durations_sec'] = (p_ends_ref - p_starts_ref + 1) / sfreq
             results['pulse_times_sec'] = p_starts_ref / sfreq
@@ -834,44 +651,20 @@ def main_original_structure():
             results['pulse_durations_sec'] = np.array([])
             results['pulse_times_sec'] = np.array([])
 
-        original_p_ends_ref = np.copy(p_ends_ref)
-        p_ends_for_spline = np.copy(p_ends_ref) 
-
-        if len(p_starts_ref) > 1: 
-            print("\nAdjusting pulse end times for spline interpolation to ensure contiguous regions (start-to-start)...")
-            for i in range(len(p_starts_ref) - 1): 
-                current_pulse_start = p_starts_ref[i]
-                next_pulse_start = p_starts_ref[i+1]
-                adjusted_end = next_pulse_start - 1
-                if adjusted_end < current_pulse_start:
-                    print(f"  Warning: For pulse {i} (start: {current_pulse_start}), "
-                          f"the next pulse starts too soon ({next_pulse_start}).")
-                    print(f"  Cannot make fully contiguous without overlap or creating an invalid segment. "
-                          f"Using original refined end for this segment's spline: {p_ends_for_spline[i]}")
-                else:
-                    p_ends_for_spline[i] = adjusted_end
-            print(f"  Original refined ends (first 3 examples): {original_p_ends_ref[:min(3, len(original_p_ends_ref))]}")
-            print(f"  Adjusted ends for spline (first 3 examples): {p_ends_for_spline[:min(3, len(p_ends_for_spline))]}")
-        elif len(p_starts_ref) == 1:
-            print("\nOnly one pulse detected. Using original refined end times for spline interpolation.")
-        else: 
-            print("\nNo pulses detected; no adjustments for contiguity needed for spline.")
-
-        results['pulse_ends_spline_adjusted'] = p_ends_for_spline
-        results['pulse_durations_spline_adjusted_sec'] = (p_ends_for_spline - p_starts_ref + 1) / sfreq if len(p_starts_ref) > 0 else np.array([])
-
-        visualize_pulse_detection(signal_for_detection, sfreq, stim_freq, template, template_start_idx,
+        print("\nVisualizing pulse detection...")
+        visualize_pulse_detection(signal_for_analysis, sfreq, final_stim_freq, template, template_start_idx,
                                 p_starts_ref, p_ends_ref, stim_start_t, stim_end_t)
 
-        print(f"\nApplying Spline Interpolation to ALL {data.shape[0]} channels...")
+        print(f"\nApplying Spline Interpolation to ALL {all_channels_data.shape[0]} channels...")
         corrected_data_all = spline_artifact_extended_anchors(
-            data, p_starts_ref, p_ends_for_spline, sfreq, buffer_ms=5.0) # Use p_ends_for_spline
+            all_channels_data, p_starts_ref, p_ends_ref, sfreq, buffer_ms=5.0)
         results['corrected_data_all_channels'] = corrected_data_all
         print("Spline interpolation complete for all channels.")
 
-        print(f"Visualizing spline result for channel {channel_idx_for_analysis}...")
-        original_sig_selected = data[channel_idx_for_analysis]
-        corrected_sig_selected = corrected_data_all[channel_idx_for_analysis] if corrected_data_all.ndim == 2 else corrected_data_all
+        print(f"\nVisualizing spline result for analysis channel {best_channel_idx} ({ch_names[best_channel_idx]})...")
+        original_sig_selected = all_channels_data[best_channel_idx]
+        # Ensure corrected_data_all is indexed correctly if it became 1D (e.g. if only 1 channel in original data)
+        corrected_sig_selected = corrected_data_all[best_channel_idx] if corrected_data_all.ndim == 2 else corrected_data_all
 
         times_v = np.arange(len(original_sig_selected)) / sfreq
         plt.figure(figsize=(18, 7))
@@ -880,7 +673,7 @@ def main_original_structure():
             vis_start_spline_s = max(0, (p_starts_ref[0] / sfreq) - 0.1)
             # Show a few pulses or a fixed duration
             num_pulses_to_show = min(len(p_starts_ref), 5)
-            vis_end_spline_s = min(times_v[-1], (p_ends_for_spline[num_pulses_to_show-1] / sfreq) + 0.1) 
+            vis_end_spline_s = min(times_v[-1], (p_ends_ref[num_pulses_to_show-1] / sfreq) + 0.1)
         else: # Fallback if no pulses
             vis_start_spline_s = stim_start_t - 0.1 if stim_start_t is not None else 0
             vis_end_spline_s = stim_end_t + 0.1 if stim_end_t is not None else min(times_v[-1] if len(times_v)>0 else 2, 2.0) # Show 2s
@@ -893,30 +686,43 @@ def main_original_structure():
 
 
         plt.plot(times_v[plot_start_idx_s:plot_end_idx_s],
-                 original_sig_selected[plot_start_idx_s:plot_end_idx_s], # Use original_sig_selected
-                 label=f'Original Ch {channel_idx_for_analysis} ({raw.ch_names[channel_idx_for_analysis]})', color='dimgray', alpha=0.7, lw=1.0)
+                 original_sig_selected[plot_start_idx_s:plot_end_idx_s],
+                 label=f'Original Ch {best_channel_idx} ({ch_names[best_channel_idx]})', color='dimgray', alpha=0.7, lw=1.0)
         plt.plot(times_v[plot_start_idx_s:plot_end_idx_s],
-                 corrected_sig_selected[plot_start_idx_s:plot_end_idx_s], # Use corrected_sig_selected
-                 label=f'Corrected Ch {channel_idx_for_analysis} ({raw.ch_names[channel_idx_for_analysis]})', color='dodgerblue', lw=1.2, alpha=0.9)
+                 corrected_sig_selected[plot_start_idx_s:plot_end_idx_s],
+                 label=f'Corrected Ch {best_channel_idx} ({ch_names[best_channel_idx]})', color='dodgerblue', lw=1.2, alpha=0.9)
 
         first_label = True
         for i in range(len(p_starts_ref)):
-            # Use p_starts_ref and p_ends_for_spline to show the actual interpolated region
-            s_spline = p_starts_ref[i]
-            e_spline = p_ends_for_spline[i] 
-            seg_disp_start = max(plot_start_idx_s, s_spline)
-            seg_disp_end = min(plot_end_idx_s, e_spline + 1)
+            s, e = p_starts_ref[i], p_ends_ref[i]
+            seg_disp_start = max(plot_start_idx_s, s)
+            seg_disp_end = min(plot_end_idx_s, e + 1)
             if seg_disp_start < seg_disp_end:
                 ts, ds = times_v[seg_disp_start:seg_disp_end], corrected_sig_selected[seg_disp_start:seg_disp_end]
                 if len(ts) > 0:
                      plt.plot(ts, ds, color='red', lw=1.8, label='Interpolated' if first_label else "", zorder=5)
                      first_label = False
-        plt.title(f'Spline Interpolation Effect on Channel {channel_idx_for_analysis} ({raw.ch_names[channel_idx_for_analysis]})', fontsize=14)
+        plt.title(f'Spline Interpolation Effect on Channel {best_channel_idx} ({ch_names[best_channel_idx]})', fontsize=14)
         plt.xlabel('Time (s)'); plt.ylabel('Amplitude')
         if plot_start_idx_s < plot_end_idx_s and len(times_v)>max(plot_start_idx_s, plot_end_idx_s-1):
             plt.xlim(times_v[plot_start_idx_s], times_v[plot_end_idx_s-1 if plot_end_idx_s > 0 else 0])
         plt.legend(loc='upper right'); plt.grid(True, linestyle=':', alpha=0.6); plt.tight_layout(); plt.show()
         return results
+
     except Exception as e:
         print(f"Error in main: {str(e)}"); import traceback; traceback.print_exc(); return results
-"""
+
+if __name__ == "__main__":
+    analysis_results = main()
+    if analysis_results and analysis_results.get('pulse_times_sec', np.array([])).size > 0:
+        print("\n--- Analysis Summary ---")
+        print(f"Analysis Channel: {analysis_results.get('analysis_channel_idx', 'N/A')} ({analysis_results.get('analysis_channel_name', 'N/A')})")
+        print(f"Final Stim Freq Used: {analysis_results.get('stim_freq', 'N/A'):.2f} Hz")
+        print(f"# Pulses refined: {len(analysis_results['pulse_starts_refined'])}")
+        print(f"First 5 pulse starts (s): {np.round(analysis_results['pulse_times_sec'][:5], 4)}")
+        print(f"First 5 pulse durations (s): {np.round(analysis_results['pulse_durations_sec'][:5], 4)}")
+        if 'corrected_data_all_channels' in analysis_results and analysis_results['corrected_data_all_channels'] is not None:
+            print(f"Corrected data shape: {analysis_results['corrected_data_all_channels'].shape}")
+        print("Pipeline completed.")
+    elif analysis_results: print("\nPipeline completed with partial or no pulse results.")
+    else: print("Pipeline failed or exited early.")

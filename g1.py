@@ -556,7 +556,8 @@ def spline_artifact_extended_anchors(data, artifact_starts, artifact_ends, sfreq
 
 
 def main():
-    
+    results = {}
+
     '''# 1) Load data
     #path = select_fif_file()
     path = select_fif_file()
@@ -639,6 +640,96 @@ def main():
         # 6) Refine pulse boundarie
         pulse_starts_refined, pulse_ends_refined = refine_pulse_boundaries(
             signal, pulse_starts, pulse_ends, sfreq)
+        
+        # In your main() function:
+
+        # ... (previous code, up to and including refinement)
+        #        pulse_starts, pulse_ends, correlation_scores = cross_correlate_pulses(...)
+        #        pulse_starts_refined, pulse_ends_refined = refine_pulse_boundaries(...)
+
+        # Store the original refined ends for comparison or other uses if needed
+        original_pulse_ends_refined = np.copy(pulse_ends_refined)
+
+        # --- START OF NEW/MODIFIED CHUNK ---
+        # Adjust pulse end times to make interpolation regions contiguous
+        if len(pulse_starts_refined) > 1:
+            print("\nAdjusting pulse end times to ensure contiguous regions for interpolation...")
+            # Create a new array for the adjusted end times, initially a copy of the refined ends
+            # This will be the version used for spline interpolation and potentially visualization
+            pulse_ends_for_contiguous_interpolation = np.copy(pulse_ends_refined)
+
+            for i in range(len(pulse_starts_refined) - 1):
+                current_pulse_start = pulse_starts_refined[i]
+                next_pulse_start = pulse_starts_refined[i+1]
+                
+                # The new end for the current pulse's interpolation region is one sample
+                # before the start of the next pulse's interpolation region.
+                # This makes the regions [start_i, end_i] and [start_{i+1}, end_{i+1}]
+                # such that end_i and start_{i+1} are adjacent.
+                adjusted_end = next_pulse_start - 1
+                
+                # Sanity check: Ensure the adjusted end is not before the current pulse's start.
+                # This could happen if pulse detections are overlapping or not correctly ordered.
+                if adjusted_end < current_pulse_start:
+                    print(f"  Warning: For pulse {i} (start: {current_pulse_start}), "
+                        f"the next pulse starts too soon ({next_pulse_start}).")
+                    print(f"  Cannot make fully contiguous without overlap or very short pulse. "
+                        f"Using original refined end: {pulse_ends_refined[i]}")
+                    # In this case, we stick to the original refined end for this pulse to avoid issues.
+                    # This means a small gap might remain if refined pulses are extremely close or overlapping.
+                    pulse_ends_for_contiguous_interpolation[i] = pulse_ends_refined[i]
+                else:
+                    pulse_ends_for_contiguous_interpolation[i] = adjusted_end
+                    
+            # The last pulse's end time (pulse_ends_for_contiguous_interpolation[-1])
+            # remains unchanged from pulse_ends_refined[-1] as there's no subsequent pulse to define its boundary.
+
+            # Update pulse_ends_refined to this new version for subsequent functions
+            # if you want this to be the default for visualization etc.
+            # Or, use 'pulse_ends_for_contiguous_interpolation' directly in the function calls.
+            # For clarity, let's assume you will now use 'pulse_ends_for_contiguous_interpolation'.
+            
+            print(f"  Example original refined ends: {original_pulse_ends_refined[:min(3, len(original_pulse_ends_refined))]}")
+            print(f"  Example adjusted ends for contiguity: {pulse_ends_for_contiguous_interpolation[:min(3, len(pulse_ends_for_contiguous_interpolation))]}")
+
+        elif len(pulse_starts_refined) == 1:
+            print("\nOnly one pulse detected. Using original refined end times for interpolation.")
+            pulse_ends_for_contiguous_interpolation = np.copy(pulse_ends_refined)
+        else:
+            print("\nNo pulses detected or less than two; no adjustments for contiguity needed.")
+            pulse_ends_for_contiguous_interpolation = np.copy(pulse_ends_refined) # or np.array([], dtype=int)
+
+        # --- END OF NEW/MODIFIED CHUNK ---
+
+
+        # 7) Comprehensive visualization (NOW USES ADJUSTED ENDS)
+        #    Make sure to pass the adjusted ends if you want the visualization to reflect this.
+        visualize_pulse_detection(signal, sfreq, template, template_start_idx,
+                                pulse_starts_refined, # Starts remain the same
+                                pulse_ends_for_contiguous_interpolation, # USE THE ADJUSTED ENDS
+                                stim_start_time, stim_end_time)
+                
+
+        # 8) Apply Cubic Spline Interpolation (NOW USES ADJUSTED ENDS)
+        print(f"\nApplying Cubic Spline Interpolation with potentially adjusted contiguous pulse ends...")
+        corrected_data_all_channels = spline_artifact_extended_anchors(
+            data,
+            pulse_starts_refined, # Starts remain the same
+            pulse_ends_for_contiguous_interpolation, # USE THE ADJUSTED ENDS
+            sfreq,
+            buffer_ms=5.0 
+        )
+        # ... (the rest of your main function, including the second visualization for spline results) ...
+        # The visualization of the spline effect will automatically reflect these new interpolation regions
+        # as it plots based on 'corrected_data_all_channels'.
+
+        # Update the results dictionary if you are using one:
+        # (Assuming 'results' dictionary exists)
+        results['pulse_ends_original_refined'] = original_pulse_ends_refined
+        results['pulse_ends_for_contiguous_interpolation'] = pulse_ends_for_contiguous_interpolation
+        # Update pulse_ends in results if it's used generally
+        results['pulse_ends'] = pulse_ends_for_contiguous_interpolation # This is now the primary set of ends for processing
+        results['pulse_durations'] = (pulse_ends_for_contiguous_interpolation - pulse_starts_refined) / sfreq
 
         # 7) Comprehensive visualization
         visualize_pulse_detection(signal, sfreq, template, template_start_idx,
